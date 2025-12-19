@@ -13,12 +13,21 @@ local localPlayer = Players.LocalPlayer
 local skinModels = {}
 local lasers = {}
 local activeBillboards = {} 
-local bombParts = {} -- Tabel khusus untuk menyimpan referensi part Bomb
+local bombParts = {} -- Tabel untuk part Bomb
 
 local LASER_COLOR = Color3.fromRGB(255, 0, 0)
 local LASER_WIDTH_SCALE = 1/12.5
 local LASER_HEIGHT_OFFSET = 0.5
 local LASER_SHORTEN = 0.50
+
+-- === FUNGSI PEMBERSIH (CLEANUP) ===
+local function removeLaser(model)
+	if lasers[model] then
+		lasers[model]:Destroy()
+		lasers[model] = nil
+	end
+	skinModels[model] = nil
+end
 
 -- === FUNGSI TRACKING BOMB & SKIN ===
 local function trackObject(obj)
@@ -28,23 +37,23 @@ local function trackObject(obj)
 	end
 
 	-- Tracking Skin Models
-	if not skinModels[obj] then
-		if obj:IsA("Model") and obj.Name:lower():sub(1,5) == "skin_" then
+	if obj:IsA("Model") and obj.Name:lower():sub(1,5) == "skin_" then
+		if not skinModels[obj] then
 			skinModels[obj] = true
 			local laser = Instance.new("Part")
+			laser.Name = "SkinLaser_" .. obj.Name
 			laser.Anchored = true
 			laser.CanCollide = false
 			laser.Material = Enum.Material.Neon
 			laser.Color = LASER_COLOR
 			laser.Transparency = 0
-			laser.Name = "SkinLaser"
 			laser.Parent = Workspace
 			lasers[obj] = laser
 		end
 	end
 end
 
--- === FUNGSI ORDEMBILLBOARD (REAL-TIME) ===
+-- === FUNGSI ORDEMBILLBOARD ===
 local function registerBillboard(billboard, head)
 	if not billboard or not head then return end
 	if activeBillboards[billboard] then return end
@@ -61,8 +70,9 @@ end
 -- === FUNGSI HITBOX & CHARACTER ===
 local function isHitbox(part)
 	local n = part.Name:lower()
-	if n:find("hitbox") or n == "hb" then return true end
-	if part.Size.Magnitude > 10 then return true end
+	if n:find("hitbox") or n == "hb" or part.Size.Magnitude > 10 then 
+		return true 
+	end
 	return false
 end
 
@@ -85,8 +95,20 @@ local function fixCharacter(character)
 	end
 end
 
+-- === SETUP PLAYER & CHARACTER ===
 local function setupCharacter(character)
 	if not character then return end
+	
+	-- Cleanup otomatis jika karakter dihapus (Mati/Leave)
+	character.AncestryChanged:Connect(function(_, parent)
+		if not parent then
+			removeLaser(character)
+			for _, item in ipairs(character:GetDescendants()) do
+				if skinModels[item] then removeLaser(item) end
+			end
+		end
+	end)
+
 	local function checkHead(child)
 		if child.Name == "Head" then
 			local bb = child:FindFirstChild("OrdemBillboard")
@@ -96,15 +118,13 @@ local function setupCharacter(character)
 			end)
 		end
 	end
+
 	local head = character:FindFirstChild("Head")
 	if head then checkHead(head) else character.ChildAdded:Connect(checkHead) end
 end
 
 -- === INITIALIZATION ===
-for _, obj in ipairs(Workspace:GetDescendants()) do
-	trackObject(obj)
-end
-
+for _, obj in ipairs(Workspace:GetDescendants()) do trackObject(obj) end
 Workspace.DescendantAdded:Connect(trackObject)
 
 for _, player in pairs(Players:GetPlayers()) do
@@ -116,15 +136,20 @@ Players.PlayerAdded:Connect(function(player)
 	player.CharacterAdded:Connect(setupCharacter)
 end)
 
+-- Pembersihan saat Player Leave
+Players.PlayerRemoving:Connect(function(player)
+	if player.Character then removeLaser(player.Character) end
+end)
+
 local function getBoundingBox(model)
 	local cframe, size
 	pcall(function() cframe, size = model:GetBoundingBox() end)
 	return cframe, size
 end
 
--- === RENDERSTEPPED LOOP ===
+-- === RENDERSTEPPED LOOP (REAL-TIME UPDATE) ===
 RunService.RenderStepped:Connect(function()
-	-- 1. Update OrdemBillboard
+	-- 1. Update Billboard
 	for billboard, head in pairs(activeBillboards) do
 		if billboard.Parent and head.Parent then
 			billboard.Enabled = true
@@ -141,19 +166,20 @@ RunService.RenderStepped:Connect(function()
 		end
 	end
 
-	-- 3. Update Bomb Parts (New)
+	-- 3. Update Bomb Parts
 	for bomb, _ in pairs(bombParts) do
-		if bomb.Parent then
+		if bomb.Parent and bomb:IsDescendantOf(Workspace) then
 			bomb.Transparency = 0
-			bomb.CanCollide = false -- Agar tidak menghalangi jalan
+			bomb.CanCollide = false
 		else
 			bombParts[bomb] = nil
 		end
 	end
 
-	-- 4. Update Skin Lasers
-	for model, _ in pairs(skinModels) do
-		if model.Parent then
+	-- 4. Update Skin Lasers & Cleanup
+	for model, laser in pairs(lasers) do
+		if model.Parent and model:IsDescendantOf(Workspace) then
+			-- Paksa skin tetap visible
 			for _, part in ipairs(model:GetDescendants()) do
 				if part:IsA("BasePart") then
 					part.Transparency = 0
@@ -164,21 +190,18 @@ RunService.RenderStepped:Connect(function()
 				end
 			end
 
-			local laser = lasers[model]
-			if laser then
-				local cframe, size = getBoundingBox(model)
-				if cframe and size then
-					local laserSize = Vector3.new(size.X * LASER_WIDTH_SCALE, size.Y * LASER_WIDTH_SCALE, size.Z - LASER_SHORTEN*2)
-					laser.Size = laserSize
-					local front = cframe.Position + (cframe.LookVector * (size.Z/2 - LASER_SHORTEN))
-					local back = cframe.Position - (cframe.LookVector * (size.Z/2 - LASER_SHORTEN))
-					local centerLine = (front + back) / 2 + Vector3.new(0, LASER_HEIGHT_OFFSET, 0)
-					laser.CFrame = CFrame.new(centerLine, centerLine + cframe.LookVector)
-				end
+			-- Update posisi laser
+			local cframe, size = getBoundingBox(model)
+			if cframe and size then
+				local laserSize = Vector3.new(size.X * LASER_WIDTH_SCALE, size.Y * LASER_WIDTH_SCALE, size.Z - LASER_SHORTEN*2)
+				laser.Size = laserSize
+				local front = cframe.Position + (cframe.LookVector * (size.Z/2 - LASER_SHORTEN))
+				local back = cframe.Position - (cframe.LookVector * (size.Z/2 - LASER_SHORTEN))
+				local centerLine = (front + back) / 2 + Vector3.new(0, LASER_HEIGHT_OFFSET, 0)
+				laser.CFrame = CFrame.new(centerLine, centerLine + cframe.LookVector)
 			end
 		else
-			if lasers[model] then lasers[model]:Destroy(); lasers[model] = nil end
-			skinModels[model] = nil
+			removeLaser(model) -- Hapus jika model hilang
 		end
 	end
 end)
